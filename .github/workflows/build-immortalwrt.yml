@@ -159,7 +159,11 @@ jobs:
             | grep "x86_64\.${PKG}$" | head -1)
           [ -n "$BANDIX_URL" ] && dl "$BANDIX_URL" "$(basename "$BANDIX_URL")" || { echo "::error::bandix ${PKG} 包未找到"; exit 1; }
           # apk3 要求本地包文件名规范为 <name>-<version>.apk，去掉 _x86_64 / _all 架构后缀
-          for f in *_x86_64.apk *_all.apk; do [ -e "$f" ] && mv -f "$f" "${f//_x86_64/}"; done
+          for f in *_x86_64.apk *_all.apk; do
+            [ -e "$f" ] || continue
+            n="${f//_x86_64/}"; n="${n//_all/}"
+            [ "$n" != "$f" ] && mv -f "$f" "$n"
+          done
 
           # ---- luci-app-bandix 界面（timsaya/luci-app-bandix，与后端同版本号）----
           LUCI_BANDIX_VER="${{ inputs.bandix_tag }}-r5"
