@@ -45,8 +45,8 @@ on:
         default: false
         type: boolean
       remove_ppp:
-        description: "移除 PPP/PPPoE 组件"
-        default: true
+        description: "移除 PPP/PPPoE 组件（需要拨号请保持关闭）"
+        default: false
         type: boolean
       bandix_tag:
         description: "bandix 版本 tag"
@@ -128,6 +128,19 @@ jobs:
           uci set network.lan.proto='static'
           uci set network.lan.ipaddr='${ROUTER_IP}'
           uci set network.lan.netmask='255.255.255.0'
+          # ===== PPPoE 拨号预设（构建时不需要填）=====
+          # 固件内置完整 PPPoE 组件；把账号密码填到下面两行引号内即可启用（留空 = WAN 保持 DHCP）
+          # 已开机后想启用：直接在路由器上执行
+          #   uci set network.wan.proto='pppoe'; uci set network.wan.username='账号'; uci set network.wan.password='密码'; uci commit network; /etc/init.d/network restart
+          PPPOE_USER=''
+          PPPOE_PASS=''
+          if [ -n "\$PPPOE_USER" ]; then
+            uci set network.wan.proto='pppoe'
+            uci set network.wan.username="\$PPPOE_USER"
+            uci set network.wan.password="\$PPPOE_PASS"
+            uci -q delete network.wan6
+            uci commit network
+          fi
           uci commit network
           exit 0
           EOF
