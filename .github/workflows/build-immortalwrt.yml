@@ -145,6 +145,9 @@ jobs:
             | jq -r '.assets[].browser_download_url' \
             | grep "x86_64\.${PKG}$" | head -1)
           [ -n "$BANDIX_URL" ] && dl "$BANDIX_URL" "$(basename "$BANDIX_URL")" || { echo "::error::bandix ${PKG} 包未找到"; exit 1; }
+          # apk3 要求本地包文件名规范为 <name>-<version>.apk，去掉 _x86_64 架构后缀
+          for f in bandix-*_x86_64.apk; do [ -e "$f" ] && mv -f "$f" "${f//_x86_64/}"; done
+          ls -la bandix*
 
           # ---- OpenClash 追新（失败则回退官方源版本）----
           OC_URL=$(curl -sL "https://api.github.com/repos/vernesong/OpenClash/releases/latest" \
