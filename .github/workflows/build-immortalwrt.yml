@@ -160,7 +160,18 @@ jobs:
           [ -n "$BANDIX_URL" ] && dl "$BANDIX_URL" "$(basename "$BANDIX_URL")" || { echo "::error::bandix ${PKG} 包未找到"; exit 1; }
           # apk3 要求本地包文件名规范为 <name>-<version>.apk，去掉 _x86_64 架构后缀
           for f in bandix-*_x86_64.apk; do [ -e "$f" ] && mv -f "$f" "${f//_x86_64/}"; done
-          ls -la bandix*
+
+          # ---- luci-app-bandix 界面（timsaya/luci-app-bandix，与后端同版本号）----
+          LUCI_BANDIX_VER="${{ inputs.bandix_tag }}-r5"
+          LUCI_BANDIX_URL=$(curl -sL "https://api.github.com/repos/timsaya/luci-app-bandix/releases/tags/${LUCI_BANDIX_VER}" \
+            | jq -r '.assets[].browser_download_url' \
+            | grep "luci-app-bandix-.*\.${PKG}$" | head -1)
+          LUCI_BANDIX_I18N_URL=$(curl -sL "https://api.github.com/repos/timsaya/luci-app-bandix/releases/tags/${LUCI_BANDIX_VER}" \
+            | jq -r '.assets[].browser_download_url' \
+            | grep "luci-i18n-bandix-zh-cn-.*\.${PKG}$" | head -1)
+          [ -n "$LUCI_BANDIX_URL" ] && dl "$LUCI_BANDIX_URL" "$(basename "$LUCI_BANDIX_URL")" || { echo "::error::luci-app-bandix ${LUCI_BANDIX_VER} 未找到"; exit 1; }
+          [ -n "$LUCI_BANDIX_I18N_URL" ] && dl "$LUCI_BANDIX_I18N_URL" "$(basename "$LUCI_BANDIX_I18N_URL")" || echo "WARN bandix 中文包未找到，跳过"
+          ls -la bandix* luci-app-bandix* luci-i18n-bandix* 2>/dev/null || true
 
           # ---- OpenClash 追新（失败则回退官方源版本）----
           OC_URL=$(curl -sL "https://api.github.com/repos/vernesong/OpenClash/releases/latest" \
@@ -216,7 +227,7 @@ jobs:
           PKGS="$PKGS nikki luci-app-nikki luci-i18n-nikki-zh-cn"
           PKGS="$PKGS momo luci-app-momo luci-i18n-momo-zh-cn"
           PKGS="$PKGS luci-app-homeproxy luci-i18n-homeproxy-zh-cn sing-box"
-          PKGS="$PKGS bandix"
+          PKGS="$PKGS bandix luci-app-bandix luci-i18n-bandix-zh-cn"
 
           if [ "${{ inputs.include_argon_config }}" = "true" ]; then
             PKGS="$PKGS luci-app-argon-config luci-i18n-argon-config-zh-cn"
