@@ -179,6 +179,8 @@ jobs:
         working-directory: ib
         run: |
           set -x
+          # 只保留 img 镜像：关闭 iso/qcow2/vdi/vmdk/vhdx（ImmortalWrt 额外有 QCOW2 开关）
+          sed -i -E 's/^(CONFIG_(ISO|QCOW2|VDI|VMDK|VHDX)_IMAGES)=y/# \1 is not set/' .config
           # ===== 基础包（参考 wukongdaily 构建清单）=====
           PKGS=""
           PKGS="$PKGS curl"
@@ -217,7 +219,7 @@ jobs:
           make image PROFILE="generic" \
             FILES="$(pwd)/files" \
             ROOTFS_PARTSIZE="${{ steps.meta.outputs.rootfs_size }}" \
-            CONFIG_ISO_IMAGES= CONFIG_VDI_IMAGES= CONFIG_VMDK_IMAGES= CONFIG_VHDX_IMAGES= \
+            CONFIG_ISO_IMAGES= CONFIG_QCOW2_IMAGES= CONFIG_VDI_IMAGES= CONFIG_VMDK_IMAGES= CONFIG_VHDX_IMAGES= \
             PACKAGES="${PKGS}"
           ls -la bin/targets/x86/64/
 
