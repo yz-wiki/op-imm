@@ -36,10 +36,6 @@ on:
           - "both"
           - "squashfs"
           - "ext4"
-      bundle_openclash_core:
-        description: "内置 OpenClash 最新 mihomo 内核 + GeoIP/GeoSite 数据"
-        default: true
-        type: boolean
       include_argon_config:
         description: "附加 argon-config（argon 主题配置插件）"
         default: true
@@ -176,28 +172,6 @@ jobs:
 
           ls -la
 
-      - name: 内置 OpenClash mihomo 内核与 GeoData
-        if: inputs.bundle_openclash_core
-        run: |
-          mkdir -p ib/files/etc/openclash/core ib/files/etc/openclash
-
-          # 最新 mihomo 内核（linux-amd64）→ clash_meta
-          MIHOMO_URL=$(curl -sL "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest" \
-            | jq -r '.assets[].browser_download_url' \
-            | grep -E 'mihomo-linux-amd64-[0-9].*\.gz$' | grep -v compatible | head -1)
-          [ -n "$MIHOMO_URL" ] || { echo "::error::未找到 mihomo 内核"; exit 1; }
-          curl -fL --retry 3 "$MIHOMO_URL" | gunzip > ib/files/etc/openclash/core/clash_meta
-          chmod 755 ib/files/etc/openclash/core/clash_meta
-          echo "mihomo 内核: $(basename "$MIHOMO_URL")"
-
-          # GeoData（MetaCubeX/meta-rules-dat）
-          BASE="https://github.com/MetaCubeX/meta-rules-dat/releases/latest/download"
-          curl -fL --retry 3 "${BASE}/geoip.dat"    -o ib/files/etc/openclash/GeoIP.dat
-          curl -fL --retry 3 "${BASE}/geosite.dat"  -o ib/files/etc/openclash/GeoSite.dat
-          curl -fL --retry 3 "${BASE}/country.mmdb" -o ib/files/etc/openclash/Country.mmdb
-          curl -fL --retry 3 "${BASE}/ASN.mmdb"     -o ib/files/etc/openclash/ASN.mmdb
-          ls -la ib/files/etc/openclash/
-
       - name: 构建固件
         working-directory: ib
         run: |
@@ -255,7 +229,7 @@ jobs:
           - 👤 **用户名**: root　🔑 **密码**: 无
 
           ## 内置插件
-          - OpenClash（${{ inputs.bundle_openclash_core == true && '内置最新 mihomo 内核 + GeoIP/GeoSite/ASN 数据' || '官方源版本' }}）
+          - OpenClash（官方源版本，mihomo 内核与 GeoData 可在插件内按需更新）
           - nikki / momo（官方 feed 最新版，内核可在插件内按需下载）
           - Homeproxy
           - bandix ${{ inputs.bandix_tag }}

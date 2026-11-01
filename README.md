@@ -19,7 +19,7 @@
 | 管理地址 | 写入 `files/etc/uci-defaults/99-custom.sh`，首次开机自动应用 LAN IP（默认 `10.10.1.1`） |
 | 软件包空间 | 1G / 2G / 3G / 4G（映射 ROOTFS_PARTSIZE 1024~4096） |
 | 固件格式 | both（默认全发布）/ squashfs（可恢复出厂）/ ext4（可离线扩容） |
-| 内置 mihomo 内核 | 默认开启：最新 mihomo + GeoIP.dat / GeoSite.dat / Country.mmdb / ASN.mmdb 直接写进固件 |
+| mihomo 内核 | 不预制，OpenClash 内可一键更新最新内核与 GeoData |
 | argon-config | 默认开启：argon 主题的可视化配置插件 |
 | sing-box-easy | 默认关闭；**仅 24.10 (ipk) 可用**，25.12 (apk) 自动跳过 |
 | 移除 PPP | 默认开启：固件不含 PPP/PPPoE，WAN 默认 DHCP |
