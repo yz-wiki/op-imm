@@ -178,6 +178,9 @@ jobs:
       - name: 构建固件
         working-directory: ib
         run: |
+          # qemu-utils 提供 qemu-img，x86 profile 会生成 qcow2/vdi 镜像
+          sudo apt-get update -qq && sudo apt-get install -y -qq qemu-utils
+
           set -x
           # ===== 基础包（参考 wukongdaily 构建清单）=====
           PKGS=""
