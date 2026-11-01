@@ -203,6 +203,14 @@ jobs:
             [ "$n" != "$f" ] && mv -f "$f" "$n"
           done
 
+          # luci-i18n-bandix 资产文件名的 commit 段用点号分隔（26.300.03255.108369b-r5），
+          # 但包内版本是波浪号（26.300.03255~108369b-r5），apk3 按规范名找不到文件，修正之
+          for f in luci-i18n-bandix-*.apk; do
+            [ -e "$f" ] || continue
+            n=$(printf '%s' "$f" | sed -E 's/([0-9])\.([0-9a-f]{6,})-/\1~\2-/')
+            [ "$n" != "$f" ] && mv -f "$f" "$n"
+          done
+
           ls -la
 
       - name: 构建固件
