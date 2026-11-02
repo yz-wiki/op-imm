@@ -215,10 +215,10 @@ jobs:
 
           LUCI_BANDIX_URL="$(curl -sL "https://api.github.com/repos/timsaya/luci-app-bandix/releases/tags/${LUCI_BANDIX_VER}" \
             | jq -r '.assets[].browser_download_url' \
-            | grep "luci-app-bandix-.*\.${PKG}$" | head -1 || true)"
+            | grep -E "luci-app-bandix[-_].*\.${PKG}$" | head -1 || true)"
           LUCI_BANDIX_I18N_URL="$(curl -sL "https://api.github.com/repos/timsaya/luci-app-bandix/releases/tags/${LUCI_BANDIX_VER}" \
             | jq -r '.assets[].browser_download_url' \
-            | grep "luci-i18n-bandix-zh-cn-.*\.${PKG}$" | head -1 || true)"
+            | grep -E "luci-i18n-bandix-zh-cn[-_].*\.${PKG}$" | head -1 || true)"
           if [ -z "$LUCI_BANDIX_URL" ]; then
             echo "::error::luci-app-bandix ${LUCI_BANDIX_VER} 未找到"; exit 1
           fi
