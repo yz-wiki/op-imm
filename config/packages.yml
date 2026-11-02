@@ -1,0 +1,179 @@
+# =============================================================================
+#  ImmortalWrt x86_64 固件 —— 插件清单
+# =============================================================================
+#  这是整份构建配置里唯一需要你日常修改的文件。
+#  改完直接去 Actions → Run workflow，不需要动 workflow 里的任何东西。
+#
+#  三个层级：
+#    1. base           —— 基础组件，每次都会编入
+#    2. groups         —— 分组插件，对应 Run workflow 页面上的开关
+#    3. extra          —— 你自己的补充，想装什么写什么
+#
+#  包名必须与仓库里的一致（opkg/apk 的包名，不是文件名）。
+#  不确定包是否存在？先查 https://downloads.immortalwrt.org 或对应 feed。
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# 1. 基础组件（官方源，默认全装，一般不用动）
+#    以 "-" 开头表示从固件里移除该包
+# -----------------------------------------------------------------------------
+base:
+  - curl
+  - ca-bundle
+  - bash
+  - ip-full
+  - unzip
+  - coreutils-nohup
+  - ruby
+  - ruby-yaml
+  - openssh-sftp-server
+  - kmod-tun
+  - kmod-inet-diag
+  - kmod-nft-tproxy
+  - kmod-nft-socket
+  - luci-compat
+  - luci-theme-argon
+  - luci-app-argon-config
+  - luci-i18n-argon-config-zh-cn
+  - luci-i18n-base-zh-cn
+  - luci-i18n-firewall-zh-cn
+  - luci-i18n-diskman-zh-cn
+  - luci-i18n-package-manager-zh-cn
+  - luci-i18n-ttyd-zh-cn
+  - luci-i18n-filemanager-zh-cn
+  # 换掉精简版 dnsmasq，装带完整功能的版本
+  - "-dnsmasq"
+  - dnsmasq-full
+
+
+# -----------------------------------------------------------------------------
+# 2. 分组插件
+#    组名与 Run workflow 的开关一一对应：
+#      proxy   ←→ enable_proxy
+#      monitor ←→ enable_monitor
+#      docker  ←→ enable_docker
+#    组内增删插件不用改 workflow；新增一个组才需要同步加开关。
+# -----------------------------------------------------------------------------
+groups:
+
+  # --- 代理 / 分流 -----------------------------------------------------------
+  proxy:
+    - luci-app-openclash
+    - nikki
+    - luci-app-nikki
+    - luci-i18n-nikki-zh-cn
+    - momo
+    - luci-app-momo
+    - luci-i18n-momo-zh-cn
+    - luci-app-homeproxy
+    - luci-i18n-homeproxy-zh-cn
+    - sing-box
+
+  # --- 流量 / 状态监控 -------------------------------------------------------
+  monitor:
+    - bandix
+    - luci-app-bandix
+    - luci-i18n-bandix-zh-cn
+
+  # --- Docker（x86 可用，默认关闭，包体积较大）-------------------------------
+  docker:
+    - docker
+    - dockerd
+    - containerd
+    - runc
+    - docker-compose
+    - luci-app-dockerman
+    - luci-i18n-dockerman-zh-cn
+
+
+# -----------------------------------------------------------------------------
+# 3. 额外插件
+#    想加什么直接写包名，例如：
+#      - luci-app-lucky
+#      - luci-i18n-lucky-zh-cn
+#    如果这个包在下面 feeds 的第三方仓库里，会自动接上仓库；如果只在 GitHub
+#    release 发布，需要在下面的 github_releases 里补一条。
+# -----------------------------------------------------------------------------
+extra: []
+
+
+# -----------------------------------------------------------------------------
+# 4. GitHub Release 插件
+#    官方源和第三方仓库都没有、只在上游 release 里发布的包。
+#    系统会按 arch(x86_64/all) 和当前包格式(apk/ipk)自动挑选资产。
+#
+#    字段：
+#      package  包名（必须与 PACKAGES 里写的一致，也用于匹配资产名开头）
+#      repo     owner/repo
+#      tag      可选，默认 latest；也可写死，如 v0.12.12
+#      required 可选，默认 false。true = 下载失败直接让构建失败；
+#               false = 只告警，改由官方源兜底（官方源有同名包时用得上）
+#
+#    只有出现在 base/groups/extra 里的包才会被下载，写在这里但没启用的不下载。
+# -----------------------------------------------------------------------------
+github_releases:
+  - package: bandix
+    repo: timsaya/openwrt-bandix
+    required: true
+
+  - package: luci-app-bandix
+    repo: timsaya/openwrt-bandix
+    required: true
+
+  - package: luci-i18n-bandix-zh-cn
+    repo: timsaya/openwrt-bandix
+    required: false
+
+  # OpenClash：优先拿上游最新版，失败则用官方源里的
+  - package: luci-app-openclash
+    repo: vernesong/OpenClash
+    required: false
+
+  # 极光主题配置页（主题本身在官方源）
+  - package: luci-app-argon-config
+    repo: jerrykuku/luci-theme-argon
+    required: false
+
+  - package: luci-i18n-argon-config-zh-cn
+    repo: jerrykuku/luci-theme-argon
+    required: false
+
+
+# -----------------------------------------------------------------------------
+# 5. 第三方软件源（feeds）
+#    提供完整仓库索引 + 公钥的第三方源。接上之后，上面的插件列表里
+#    直接写包名即可安装。
+#
+#      {branch} 会替换成 openwrt-25.12 或 openwrt-24.10
+#
+#    apk / apk_key 只在 25.12+（apk 包管理器）使用
+#    ipk / ipk_key 只在 24.10（opkg 包管理器）使用
+#    某一边不填 = 这个源在该版本下不启用。
+#
+#    签名说明（重要）：
+#      - apk 源：公钥文件名随意，apk 只比对公钥内容
+#      - ipk 源：opkg 按 usign 公钥指纹查找文件，公钥必须被重命名为指纹
+#                （workflow 会自动用 usign -F 算指纹并改名，不要手工写文件名）
+# -----------------------------------------------------------------------------
+feeds:
+  - name: nikki
+    apk:     https://nikkinikki.pages.dev/{branch}/x86_64/nikki/packages.adb
+    apk_key: https://nikkinikki.pages.dev/public-key.pem
+    ipk:     https://nikkinikki.pages.dev/{branch}/x86_64/nikki
+    ipk_key: https://nikkinikki.pages.dev/key-build.pub
+
+  - name: momo
+    apk:     https://momomomo.pages.dev/{branch}/x86_64/momo/packages.adb
+    apk_key: https://momomomo.pages.dev/public-key.pem
+    ipk:     https://momomomo.pages.dev/{branch}/x86_64/momo
+    ipk_key: https://momomomo.pages.dev/key-build.pub
+
+  # --- 加自己的源就照这个格式往下抄 -------------------------------------------
+  # - name: mysource
+  #   apk:     https://example.com/{branch}/x86_64/mysource/packages.adb
+  #   apk_key: https://example.com/public-key.pem
+  #   ipk:     https://example.com/{branch}/x86_64/mysource
+  #   ipk_key: https://example.com/key-build.pub
+  #
+  # 只想接 apk 或只想接 ipk，省略另一边即可。

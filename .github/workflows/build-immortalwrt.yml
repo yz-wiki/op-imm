@@ -1,409 +1,479 @@
 name: Build ImmortalWrt x86_64
 
+# 只用 ImageBuilder 打包固件，不编译源码，一次 5~15 分钟。
+# 插件清单在 config/packages.yml 里改，workflow 本身不需要动。
 on:
   workflow_dispatch:
     inputs:
       luci_version:
-        description: "选择luci版本（25.12.x=apk / 24.10.x=ipk，官方无 24.19）"
+        description: "ImmortalWrt 版本（25.12.x = apk，24.10.x = ipk）"
         required: true
-        default: "25.12.2"
         type: choice
+        default: "24.10.6"
         options:
+          - "24.10.6"
           - "25.12.2"
           - "25.12.1"
           - "25.12.0"
-          - "24.10.6"
+
       custom_router_ip:
-        description: "设置路由器管理地址 格式:192.168.x.1 或 10.x.x.1"
+        description: "路由器后台地址"
         required: true
+        type: string
         default: "10.10.1.1"
+
       profile:
-        description: "选择软件包空间大小"
+        description: "软件包可用空间"
         required: true
-        default: "1G"
         type: choice
+        default: "2G"
         options:
           - "1G"
           - "2G"
           - "3G"
           - "4G"
+
       filesystem:
-        description: "发布固件格式"
+        description: "img 固件的文件系统"
         required: true
-        default: "both"
         type: choice
+        default: "both"
         options:
           - "both"
           - "squashfs"
           - "ext4"
-      include_argon_config:
-        description: "附加 argon-config（argon 主题配置插件）"
+
+      formats:
+        description: "固件格式，逗号分隔：img,iso,qcow2,vmdk,vdi,vhdx；填 all = 全部；默认只有 img"
+        required: false
+        type: string
+        default: "img"
+
+      enable_proxy:
+        description: "代理套件（OpenClash / nikki / momo / Homeproxy / sing-box）"
+        required: false
+        type: boolean
         default: true
+
+      enable_monitor:
+        description: "流量监控（bandix）"
+        required: false
         type: boolean
-      include_singbox_easy:
-        description: "附加 sing-box-easy（仅 ipk/24.10 可用，25.12 自动跳过）"
+        default: true
+
+      enable_docker:
+        description: "Docker"
+        required: false
+        type: boolean
         default: false
+
+      enable_pppoe:
+        description: "预置 PPPoE 拨号账号密码"
+        required: false
         type: boolean
+        default: false
+
+      pppoe_account:
+        description: "PPPoE 宽带账号（勾选预置时必填）"
+        required: false
+        type: string
+
+      pppoe_password:
+        description: "PPPoE 宽带密码（勾选预置时必填）"
+        required: false
+        type: string
+
       remove_ppp:
-        description: "移除 PPP/PPPoE 组件（需要拨号请保持关闭）"
-        default: false
+        description: "移除固件里的 PPP/PPPoE 组件（勾选 PPPoE 拨号时不可用）"
+        required: false
         type: boolean
-      bandix_tag:
-        description: "bandix 版本 tag"
-        required: true
-        default: "v0.12.12"
+        default: false
 
 permissions:
   contents: write
 
-# release tag 固定为 Autobuild-x86-64，并发运行会互相覆盖/删除资产，必须串行
 concurrency:
-  group: build-immortalwrt
+  group: build-immortalwrt-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   build:
+    name: 构建 x86_64 固件
     runs-on: ubuntu-latest
     timeout-minutes: 60
+
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: 解析版本 / 包格式 / 固件大小
-        id: meta
+      # ---------------------------------------------------------------- 参数 --
+      - name: 解析参数
+        env:
+          LUCI_VERSION: ${{ inputs.luci_version }}
+          ROUTER_IP: ${{ inputs.custom_router_ip }}
+          PROFILE: ${{ inputs.profile }}
+          FILESYSTEM_IN: ${{ inputs.filesystem }}
+          FORMATS_IN: ${{ inputs.formats }}
+          ENABLE_PPPOE_IN: ${{ inputs.enable_pppoe }}
+          PPPOE_ACCOUNT: ${{ inputs.pppoe_account }}
+          PPPOE_PASSWORD: ${{ inputs.pppoe_password }}
+          REMOVE_PPP_IN: ${{ inputs.remove_ppp }}
         run: |
-          VER="${{ inputs.luci_version }}"
-          case "$VER" in
-            25.12*) PKG=apk; BRANCH=openwrt-25.12 ;;
-            *)      PKG=ipk; BRANCH=openwrt-24.10 ;;
+          set -euo pipefail
+
+          case "$LUCI_VERSION" in
+            25.12*) PKG=apk;  BRANCH=openwrt-25.12 ;;
+            24.10*) PKG=ipk;  BRANCH=openwrt-24.10 ;;
+            *) echo "::error::不支持的版本 $LUCI_VERSION"; exit 1 ;;
           esac
-          profile="${{ inputs.profile }}"
-          case "$profile" in
+
+          case "$PROFILE" in
             1G) ROOTFS_SIZE=1024 ;;
             2G) ROOTFS_SIZE=2048 ;;
             3G) ROOTFS_SIZE=3072 ;;
             4G) ROOTFS_SIZE=4096 ;;
+            *) echo "::error::未知空间 $PROFILE"; exit 1 ;;
           esac
-          echo "pkg=${PKG}"            >> "$GITHUB_OUTPUT"
-          echo "branch=${BRANCH}"      >> "$GITHUB_OUTPUT"
-          echo "rootfs_size=${ROOTFS_SIZE}" >> "$GITHUB_OUTPUT"
-          echo "版本: $VER | 包管理: $PKG | 分支: $BRANCH | 固件大小: $profile ($ROOTFS_SIZE MB)"
 
+          # 格式：小写、去空格；all 展开成全部
+          FMT="$(printf '%s' "$FORMATS_IN" | tr 'A-Z' 'a-z' | tr -d ' ')"
+          [ -z "$FMT" ] && FMT="img"
+          [ "$FMT" = "all" ] && FMT="img,iso,qcow2,vmdk,vdi,vhdx"
+
+          for f in ${FMT//,/ }; do
+            case "$f" in
+              img|iso|qcow2|vmdk|vdi|vhdx) ;;
+              *) echo "::error::未知固件格式：$f（可选 img,iso,qcow2,vmdk,vdi,vhdx,all）"; exit 1 ;;
+            esac
+          done
+
+          case "$FILESYSTEM_IN" in
+            both|squashfs|ext4) ;;
+            *) echo "::error::未知文件系统 $FILESYSTEM_IN"; exit 1 ;;
+          esac
+
+          if [ "$ENABLE_PPPOE_IN" = "true" ]; then
+            if [ -z "${PPPOE_ACCOUNT:-}" ] || [ -z "${PPPOE_PASSWORD:-}" ]; then
+              echo "::error::已勾选预置 PPPoE，但账号或密码为空"; exit 1
+            fi
+            if [ "$REMOVE_PPP_IN" = "true" ]; then
+              echo "::error::「预置 PPPoE」与「移除 PPP 组件」冲突，请二选一"; exit 1
+            fi
+          fi
+
+          {
+            echo "VER=$LUCI_VERSION"
+            echo "PKG=$PKG"
+            echo "BRANCH=$BRANCH"
+            echo "ROOTFS_SIZE=$ROOTFS_SIZE"
+            echo "FILESYSTEM=$FILESYSTEM_IN"
+            echo "FORMATS=$FMT"
+            echo "ROUTER_IP=$ROUTER_IP"
+            echo "ENABLE_PPPOE=$ENABLE_PPPOE_IN"
+            echo "REMOVE_PPP=$REMOVE_PPP_IN"
+            echo "PPPOE_ACCOUNT=$PPPOE_ACCOUNT"
+            echo "PPPOE_PASSWORD=$PPPOE_PASSWORD"
+          } >> "$GITHUB_ENV"
+
+          echo "版本 $LUCI_VERSION（$PKG / $BRANCH），空间 $PROFILE，格式 $FMT，后台 $ROUTER_IP"
+
+      # ---------------------------------------------------------------- 计划 --
+      - name: 生成构建计划（读取 config/packages.yml）
+        env:
+          ENABLE_PROXY: ${{ inputs.enable_proxy }}
+          ENABLE_MONITOR: ${{ inputs.enable_monitor }}
+          ENABLE_DOCKER: ${{ inputs.enable_docker }}
+        run: |
+          set -euo pipefail
+          python3 -c "import yaml" 2>/dev/null \
+            || pip3 install --quiet --disable-pip-version-check pyyaml \
+            || pip3 install --quiet --break-system-packages pyyaml
+          python3 scripts/plan.py
+
+      # ------------------------------------------------------------ 下载 IB --
       - name: 下载并解压官方 ImageBuilder
         run: |
-          VER="${{ inputs.luci_version }}"
-          curl -fL --retry 3 -o ib.tar.zst \
-            "https://downloads.immortalwrt.org/releases/${VER}/targets/x86/64/immortalwrt-imagebuilder-${VER}-x86-64.Linux-x86_64.tar.zst"
+          set -euo pipefail
+          URL="https://downloads.immortalwrt.org/releases/${VER}/targets/x86/64/immortalwrt-imagebuilder-${VER}-x86-64.Linux-x86_64.tar.zst"
+          echo "下载 $URL"
+          curl -fL --retry 3 --retry-delay 5 -o ib.tar.zst "$URL"
           tar --zstd -xf ib.tar.zst
           mv immortalwrt-imagebuilder-* ib
-          ls ib | head
+          rm -f ib.tar.zst
+          mkdir -p ib/keys
+          ls -d ib
 
-      - name: 添加第三方源（nikki / momo）与签名密钥
-        working-directory: ib
+      # -------------------------------------------------------------- feeds --
+      - name: 接入第三方源与公钥
         run: |
-          PKG="${{ steps.meta.outputs.pkg }}"
-          BRANCH="${{ steps.meta.outputs.branch }}"
-          mkdir -p keys
+          set -euo pipefail
           if [ "$PKG" = "apk" ]; then
-            # apk 版 ImageBuilder：仓库文件为 repositories，每行一个 packages.adb 地址
-            echo "https://nikkinikki.pages.dev/${BRANCH}/x86_64/nikki/packages.adb" >> repositories
-            echo "https://momomomo.pages.dev/${BRANCH}/x86_64/momo/packages.adb"   >> repositories
-            # apk 用 --keys-dir 扫描目录里的 PEM 公钥，文件名任意
-            curl -fL --retry 3 -o keys/nikki.pem "https://nikkinikki.pages.dev/public-key.pem"
-            curl -fL --retry 3 -o keys/momo.pem  "https://momomomo.pages.dev/public-key.pem"
-            cat repositories
+            # apk：公钥文件名随意，apk 只比对内容
+            while IFS=$'\t' read -r name url key; do
+              [ -z "$name" ] && continue
+              echo "$url" >> ib/repositories
+              if [ -n "$key" ]; then
+                curl -fsSL --retry 3 -o "ib/keys/${name}.pem" "$key" \
+                  || { echo "::error::${name} 公钥下载失败: $key"; exit 1; }
+                echo "  源 $name 已接入（apk，公钥 keys/${name}.pem）"
+              else
+                echo "  源 $name 已接入（apk，无公钥）"
+              fi
+            done < <(jq -r '.feeds[] | [.name, .url, .key] | @tsv' /tmp/plan.json)
           else
-            # opkg 版 ImageBuilder：仓库文件为 repositories.conf
-            printf 'src/gz nikki https://nikkinikki.pages.dev/%s/x86_64/nikki\n' "$BRANCH" >> repositories.conf
-            printf 'src/gz momo https://momomomo.pages.dev/%s/x86_64/momo\n'   "$BRANCH" >> repositories.conf
-            # 关键：opkg 的验签程序 scripts/opkg-key 是按“公钥指纹”当文件名在 keys/ 里找公钥的
-            #   opkg_key_verify: usign -V -P "$OPKG_KEYS" ...   ->  usign 读 OPKG_KEYS/<usign -F 指纹>
-            # 如果直接把公钥存成 keys/nikki.pub，验签永远失败，nikki/momo 源的包一个都装不上，
-            # 构建会在 package_install 阶段报 "package mentioned in index not found"。
-            # 所以这里必须先用 usign 取指纹，再以指纹名落盘（等价于 scripts/opkg-key add）。
-            export PATH="$PWD/staging_dir/host/bin:$PATH"
-            add_key() {
-              name="$1"; url="$2"
-              tmp="keys/.${name}.pub.tmp"
-              if ! curl -fsSL --retry 3 -o "$tmp" "$url"; then
-                echo "::error::${name} 公钥下载失败: ${url}"; exit 1
+            # opkg：公钥必须命名为 usign 指纹，否则验签必然失败
+            export PATH="$PWD/ib/staging_dir/host/bin:$PATH"
+            while IFS=$'\t' read -r name url key; do
+              [ -z "$name" ] && continue
+              printf 'src/gz %s %s\n' "$name" "$url" >> ib/repositories.conf
+              if [ -n "$key" ]; then
+                tmp="ib/keys/.${name}.pub.tmp"
+                curl -fsSL --retry 3 -o "$tmp" "$key" \
+                  || { echo "::error::${name} 公钥下载失败: $key"; exit 1; }
+                fp="$(usign -F -p "$tmp" || true)"
+                if [ -z "$fp" ]; then
+                  echo "::error::${name} 公钥解析不出指纹: $key"; exit 1
+                fi
+                mv -f "$tmp" "ib/keys/$fp"
+                echo "  源 $name 已接入（ipk，公钥指纹 $fp）"
+              else
+                echo "  源 $name 已接入（ipk，无公钥）"
               fi
-              fp="$(usign -F -p "$tmp" || true)"
-              if [ -z "$fp" ]; then
-                echo "::error::${name} 公钥解析不出指纹: ${url}"; exit 1
-              fi
-              mv -f "$tmp" "keys/$fp"
-              echo "OK  keys/$fp  <- ${name}"
-            }
-            add_key nikki "https://nikkinikki.pages.dev/key-build.pub"
-            add_key momo  "https://momomomo.pages.dev/key-build.pub"
-            cat repositories.conf
-            ls -la keys
+            done < <(jq -r '.feeds[] | [.name, .url, .key] | @tsv' /tmp/plan.json)
           fi
 
-      - name: Save Custom Router IP into uci-defaults
+      # ------------------------------------------------------- uci-defaults --
+      - name: 写入默认配置（后台地址 / 语言 / PPPoE）
         run: |
+          set -euo pipefail
+          # 单引号转义，避免密码里的特殊字符破坏生成的脚本
+          esc() { printf '%s' "$1" | sed "s/'/'\\\\''/g"; }
+
           mkdir -p ib/files/etc/uci-defaults
-          ROUTER_IP="${{ inputs.custom_router_ip }}"
-          cat > ib/files/etc/uci-defaults/99-custom.sh <<EOF
-          #!/bin/sh
-          # 默认中文界面 + argon 主题
-          uci set luci.main.lang='zh_cn'
-          uci set luci.main.mediaurlbase='/luci-static/argon'
-          uci commit luci
-          # 管理地址（仅多网口机型生效）
-          uci set network.lan.proto='static'
-          uci set network.lan.ipaddr='${ROUTER_IP}'
-          uci set network.lan.netmask='255.255.255.0'
-          # ===== PPPoE 拨号预设（构建时不需要填）=====
-          # 固件内置完整 PPPoE 组件；把账号密码填到下面两行引号内即可启用（留空 = WAN 保持 DHCP）
-          # 已开机后想启用：直接在路由器上执行
-          #   uci set network.wan.proto='pppoe'; uci set network.wan.username='账号'; uci set network.wan.password='密码'; uci commit network; /etc/init.d/network restart
-          PPPOE_USER=''
-          PPPOE_PASS=''
-          if [ -n "\$PPPOE_USER" ]; then
-            uci set network.wan.proto='pppoe'
-            uci set network.wan.username="\$PPPOE_USER"
-            uci set network.wan.password="\$PPPOE_PASS"
-            uci -q delete network.wan6
-            uci commit network
-          fi
-          uci commit network
-          exit 0
-          EOF
-          chmod +x ib/files/etc/uci-defaults/99-custom.sh
-          cat ib/files/etc/uci-defaults/99-custom.sh
+          S=ib/files/etc/uci-defaults/99-custom.sh
 
-      - name: 下载本地插件包（OpenClash 追新 / bandix / argon-config / sing-box-easy）
-        working-directory: ib/packages
-        run: |
-          PKG="${{ steps.meta.outputs.pkg }}"
-          # GitHub Actions 的 run 默认是 bash -e：任何“探测型”命令（尤其管道末尾的 grep）
-          # 返回非 0 都会让整个步骤中止，连后面的降级分支都走不到。所以下面一律显式兜底。
-          dl() {
-            rm -f "$2"
-            if curl -fL --retry 3 --retry-delay 2 -o "$2" "$1"; then
-              echo "OK    $2"
-              return 0
+          {
+            echo '#!/bin/sh'
+            echo '# 由 GitHub Actions 生成，首次开机执行一次后自动删除'
+            echo 'uci set luci.main.lang="zh_cn"'
+            echo 'uci set luci.main.mediaurlbase="/luci-static/argon"'
+            echo 'uci set luci.themes.Argon="/luci-static/argon"'
+            echo 'uci set network.lan.proto="static"'
+            printf 'uci set network.lan.ipaddr="%s"\n' "$(esc "$ROUTER_IP")"
+            echo 'uci set network.lan.netmask="255.255.255.0"'
+            if [ "$ENABLE_PPPOE" = "true" ]; then
+              echo 'uci set network.wan.proto="pppoe"'
+              printf 'uci set network.wan.username="%s"\n' "$(esc "$PPPOE_ACCOUNT")"
+              printf 'uci set network.wan.password="%s"\n' "$(esc "$PPPOE_PASSWORD")"
+              echo 'uci set network.wan.ipv6="auto"'
+              echo 'uci -q delete network.wan6 || true'
             fi
-            rm -f "$2"
-            echo "SKIP  $1"
-            return 1
+            echo 'uci commit'
+            echo 'exit 0'
+          } > "$S"
+
+          chmod +x "$S"
+          echo "----- $S -----"
+          cat "$S"
+
+      # ---------------------------------------------------- GitHub release --
+      - name: 下载 GitHub Release 插件
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p ib/packages
+          TOKEN="${GITHUB_TOKEN:-}"
+
+          api() {
+            if [ -n "$TOKEN" ]; then
+              curl -fsSL --retry 3 -H "Authorization: Bearer $TOKEN" "$1"
+            else
+              curl -fsSL --retry 3 "$1"
+            fi
           }
 
-          # ---- bandix（本地包，必须成功）----
-          BANDIX_URL="$(curl -sL "https://api.github.com/repos/timsaya/openwrt-bandix/releases/tags/${{ inputs.bandix_tag }}" \
-            | jq -r '.assets[].browser_download_url' \
-            | grep "x86_64\.${PKG}$" | head -1 || true)"
-          if [ -z "$BANDIX_URL" ]; then
-            echo "::error::bandix ${PKG} 包未找到（tag=${{ inputs.bandix_tag }}）"; exit 1
-          fi
-          dl "$BANDIX_URL" "$(basename "$BANDIX_URL")" || { echo "::error::bandix 下载失败：$BANDIX_URL"; exit 1; }
-
-          # ---- luci-app-bandix 界面（timsaya/luci-app-bandix，与后端同版本号）----
-          # 后端 tag 形如 v0.12.12，界面 tag 形如 v0.12.12-r5；r5 会随上游递增，不能写死。
-          # 先试 ${bandix_tag}-r5，不存在就在最近 50 个 release 里找以 bandix_tag 开头的最新 tag。
-          LUCI_BANDIX_VER="${{ inputs.bandix_tag }}-r5"
-          if ! curl -sfL -o /dev/null "https://api.github.com/repos/timsaya/luci-app-bandix/releases/tags/${LUCI_BANDIX_VER}"; then
-            LUCI_BANDIX_VER="$(curl -sL "https://api.github.com/repos/timsaya/luci-app-bandix/releases?per_page=50" \
-              | jq -r --arg t "${{ inputs.bandix_tag }}" '[.[] | .tag_name | select(startswith($t))][0] // empty' || true)"
-          fi
-          if [ -z "$LUCI_BANDIX_VER" ]; then
-            echo "::error::luci-app-bandix 找不到与 ${{ inputs.bandix_tag }} 对应的 release"; exit 1
-          fi
-          echo "luci-app-bandix tag: $LUCI_BANDIX_VER"
-
-          LUCI_BANDIX_URL="$(curl -sL "https://api.github.com/repos/timsaya/luci-app-bandix/releases/tags/${LUCI_BANDIX_VER}" \
-            | jq -r '.assets[].browser_download_url' \
-            | grep -E "luci-app-bandix[-_].*\.${PKG}$" | head -1 || true)"
-          LUCI_BANDIX_I18N_URL="$(curl -sL "https://api.github.com/repos/timsaya/luci-app-bandix/releases/tags/${LUCI_BANDIX_VER}" \
-            | jq -r '.assets[].browser_download_url' \
-            | grep -E "luci-i18n-bandix-zh-cn[-_].*\.${PKG}$" | head -1 || true)"
-          if [ -z "$LUCI_BANDIX_URL" ]; then
-            echo "::error::luci-app-bandix ${LUCI_BANDIX_VER} 未找到"; exit 1
-          fi
-          dl "$LUCI_BANDIX_URL" "$(basename "$LUCI_BANDIX_URL")" || { echo "::error::luci-app-bandix 下载失败"; exit 1; }
-          if [ -n "$LUCI_BANDIX_I18N_URL" ]; then
-            dl "$LUCI_BANDIX_I18N_URL" "$(basename "$LUCI_BANDIX_I18N_URL")" || echo "WARN bandix 中文包下载失败，构建时跳过"
-          else
-            echo "WARN ${LUCI_BANDIX_VER} 里没有 bandix 中文包，构建时跳过"
-          fi
-          ls -la bandix* luci-app-bandix* luci-i18n-bandix* 2>/dev/null || true
-
-          # ---- OpenClash 追新（失败则回退官方源版本）----
-          OC_URL="$(curl -sL "https://api.github.com/repos/vernesong/OpenClash/releases/latest" \
-            | jq -r '.assets[].browser_download_url' \
-            | grep "\.${PKG}$" | head -1 || true)"
-          if [ -n "$OC_URL" ]; then
-            dl "$OC_URL" "$(basename "$OC_URL")" || echo "OpenClash 追新失败，使用官方源版本"
-          else
-            echo "OpenClash 上游没有 ${PKG} 资产，使用官方源版本"
-          fi
-
-          # ---- argon-config（失败则仅保留官方源 argon 主题）----
-          if [ "${{ inputs.include_argon_config }}" = "true" ]; then
-            AC_URL="$(curl -sL "https://api.github.com/repos/jerrykuku/luci-theme-argon/releases/latest" \
-              | jq -r '.assets[].browser_download_url' \
-              | grep "luci-app-argon-config" | grep -v "i18n" | grep "\.${PKG}$" | head -1 || true)"
-            if [ -n "$AC_URL" ]; then
-              dl "$AC_URL" "$(basename "$AC_URL")" || echo "argon-config 下载失败，构建时跳过"
-            else
-              echo "argon-config 上游没有 ${PKG} 资产，构建时跳过"
+          # 从资产列表里挑出属于 $pkg 的那一个；优先 x86_64 / all
+          pick() {
+            best="$(printf '%s\n' "$1" | grep -E "/${2}[-_][^/]*\.${PKG}$" | grep -E "x86_64|all" | head -1)"
+            if [ -z "$best" ]; then
+              best="$(printf '%s\n' "$1" | grep -E "/${2}[-_][^/]*\.${PKG}$" | head -1)"
             fi
+            printf '%s\n' "$best"
+          }
+
+          set +e
+          { jq -r '.releases[] | [.package, .repo, .tag, (.required|tostring)] | @tsv' /tmp/plan.json \
+            | while IFS=$'\t' read -r pkg repo tag required; do
+                [ -z "$pkg" ] && continue
+                echo "→ $pkg  ($repo @ $tag)"
+
+                if [ "$tag" = "latest" ]; then
+                  list="$(api "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null \
+                          | jq -r '.assets[].browser_download_url' 2>/dev/null)"
+                else
+                  list="$(api "https://api.github.com/repos/${repo}/releases/tags/${tag}" 2>/dev/null \
+                          | jq -r '.assets[].browser_download_url' 2>/dev/null)"
+                fi
+                url="$(pick "$list" "$pkg")"
+
+                # 最新版里没有 → 往最近 30 个 release 里翻（上游常把后端和 luci 分开发版）
+                if [ -z "$url" ] && [ "$tag" = "latest" ]; then
+                  list="$(api "https://api.github.com/repos/${repo}/releases?per_page=30" 2>/dev/null \
+                          | jq -r '.[].assets[].browser_download_url' 2>/dev/null)"
+                  url="$(pick "$list" "$pkg")"
+                fi
+
+                if [ -z "$url" ]; then
+                  if [ "$required" = "true" ]; then
+                    echo "::error::${pkg} 在 ${repo} 里找不到可用的 .${PKG} 资产"
+                    exit 1
+                  fi
+                  echo "  ⚠️  没找到，跳过"
+                  continue
+                fi
+
+                f="ib/packages/$(basename "$url")"
+                rm -f "$f"
+                if curl -fsSL --retry 3 -o "$f" "$url"; then
+                  echo "  ✓ $(basename "$f")"
+                else
+                  rm -f "$f"
+                  if [ "$required" = "true" ]; then
+                    echo "::error::下载失败 $url"
+                    exit 1
+                  fi
+                  echo "  ⚠️  下载失败，跳过"
+                fi
+              done
+          }
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::插件下载阶段失败"
+            exit "$rc"
           fi
 
-          # ---- sing-box-easy（仅 ipk）----
-          if [ "${{ inputs.include_singbox_easy }}" = "true" ] && [ "$PKG" = "ipk" ]; then
-            SBE_URL="$(curl -sL "https://api.github.com/repos/SealinGp/sing-box-easy/releases/latest" \
-              | jq -r '.assets[].browser_download_url' \
-              | grep "sing-box-easy_.*_x86_64\.ipk$" | head -1 || true)"
-            if [ -n "$SBE_URL" ]; then
-              dl "$SBE_URL" "$(basename "$SBE_URL")" || echo "sing-box-easy 下载失败，构建时跳过"
-            else
-              echo "sing-box-easy 上游没有 x86_64 ipk 资产，构建时跳过"
-            fi
-          elif [ "${{ inputs.include_singbox_easy }}" = "true" ]; then
-            echo "::warning::sing-box-easy 仅提供 ipk，25.12 (apk) 自动跳过"
-          fi
-
-          # apk3 要求本地包文件名规范为 <name>-<version>.apk，去掉 _x86_64 / _all 架构后缀
-          # （放在所有下载完成之后统一处理）
-          for f in *_x86_64.apk *_all.apk; do
-            [ -e "$f" ] || continue
-            n="${f//_x86_64/}"; n="${n//_all/}"
-            [ "$n" != "$f" ] && mv -f "$f" "$n"
-          done
-          true
-
-          # luci-i18n-bandix 资产文件名的 commit 段用点号分隔（26.300.03255.108369b-r5），
-          # 但包内版本是波浪号（26.300.03255~108369b-r5），apk3 按规范名找不到文件，修正之
-          for f in luci-i18n-bandix-*.apk; do
-            [ -e "$f" ] || continue
-            n=$(printf '%s' "$f" | sed -E 's/([0-9])\.([0-9a-f]{6,})-/\1~\2-/')
-            [ "$n" != "$f" ] && mv -f "$f" "$n"
-          done
-          true
-
-          ls -la
-
-      - name: 构建固件
-        working-directory: ib
+      - name: 规范化 apk 文件名（25.12 命名规则）
         run: |
-          set -x
-          # 只保留 img 镜像：关闭 iso/qcow2/vdi/vmdk/vhdx（ImmortalWrt 额外有 QCOW2 开关）
-          sed -i -E 's/^(CONFIG_(ISO|QCOW2|VDI|VMDK|VHDX)_IMAGES)=y/# \1 is not set/' .config
-          # ===== 基础包（参考 wukongdaily 构建清单）=====
-          PKGS=""
-          PKGS="$PKGS curl"
-          PKGS="$PKGS luci-i18n-diskman-zh-cn"
-          PKGS="$PKGS luci-i18n-firewall-zh-cn"
-          PKGS="$PKGS luci-theme-argon"
-          PKGS="$PKGS luci-i18n-package-manager-zh-cn"
-          PKGS="$PKGS luci-i18n-ttyd-zh-cn"
-          PKGS="$PKGS openssh-sftp-server"
-          PKGS="$PKGS luci-i18n-filemanager-zh-cn"
-          PKGS="$PKGS luci-i18n-base-zh-cn"
-
-          # ===== dnsmasq-full（OpenClash 依赖）=====
-          PKGS="$PKGS -dnsmasq dnsmasq-full"
-          PKGS="$PKGS bash ca-bundle ip-full unzip coreutils-nohup ruby ruby-yaml"
-          PKGS="$PKGS kmod-tun kmod-inet-diag kmod-nft-tproxy kmod-nft-socket luci-compat"
-
-          # ===== 代理插件 =====
-          PKGS="$PKGS luci-app-openclash"
-          PKGS="$PKGS nikki luci-app-nikki luci-i18n-nikki-zh-cn"
-          PKGS="$PKGS momo luci-app-momo luci-i18n-momo-zh-cn"
-          PKGS="$PKGS luci-app-homeproxy luci-i18n-homeproxy-zh-cn sing-box"
-          PKGS="$PKGS bandix luci-app-bandix"
-
-          # ===== 可选包：只加“本地确实下到了”的，避免 index not found 直接构建失败 =====
-          have() { ls packages/$1* >/dev/null 2>&1; }
-
-          if have luci-i18n-bandix-zh-cn; then
-            PKGS="$PKGS luci-i18n-bandix-zh-cn"
+          if [ "$PKG" = "apk" ]; then
+            bash scripts/fix-apk-names.sh ib/packages
           else
-            echo "skip luci-i18n-bandix-zh-cn（本地包不存在）"
+            echo "ipk 不需要改文件名"
           fi
 
-          if [ "${{ inputs.include_argon_config }}" = "true" ]; then
-            if have luci-app-argon-config; then
-              PKGS="$PKGS luci-app-argon-config"
-              if have luci-i18n-argon-config; then
-                PKGS="$PKGS luci-i18n-argon-config-zh-cn"
-              else
-                echo "skip luci-i18n-argon-config-zh-cn（本地包不存在）"
-              fi
-            else
-              echo "skip luci-app-argon-config（本地包不存在，回退官方源 argon 主题）"
-            fi
-          fi
+      - name: 剔除没下到的可选插件
+        run: python3 scripts/prune.py ib/packages
 
-          if [ "${{ inputs.include_singbox_easy }}" = "true" ] && [ "${{ steps.meta.outputs.pkg }}" = "ipk" ]; then
-            if have sing-box-easy; then
-              PKGS="$PKGS sing-box-easy"
-            else
-              echo "skip sing-box-easy（本地包不存在）"
-            fi
-          fi
+      # -------------------------------------------------------------- build --
+      - name: 构建固件
+        run: |
+          set -euo pipefail
+          cd ib
 
-          if [ "${{ inputs.remove_ppp }}" = "true" ]; then
+          # 先全部关掉虚拟盘格式，再按用户选择打开
+          sed -i -E 's/^(CONFIG_(ISO|QCOW2|VDI|VMDK|VHDX)_IMAGES)=y/# \1 is not set/' .config
+
+          FMT_ARGS=""
+          for f in ${FORMATS//,/ }; do
+            case "$f" in
+              iso)   FMT_ARGS="$FMT_ARGS CONFIG_ISO_IMAGES=y" ;;
+              qcow2) FMT_ARGS="$FMT_ARGS CONFIG_QCOW2_IMAGES=y" ;;
+              vdi)   FMT_ARGS="$FMT_ARGS CONFIG_VDI_IMAGES=y" ;;
+              vmdk)  FMT_ARGS="$FMT_ARGS CONFIG_VMDK_IMAGES=y" ;;
+              vhdx)  FMT_ARGS="$FMT_ARGS CONFIG_VHDX_IMAGES=y" ;;
+              img)   ;;  # 默认产物，无需开关
+            esac
+          done
+
+          PKGS="$(cat /tmp/packages.txt)"
+          if [ "$REMOVE_PPP" = "true" ]; then
             PKGS=" -ppp -ppp-mod-pppoe ${PKGS}"
           fi
-          set +x
 
           echo "PACKAGES: ${PKGS}"
-          make image PROFILE="generic" \
+          echo "格式参数: ${FMT_ARGS}"
+
+          set -x
+          make image \
+            PROFILE="generic" \
             FILES="$(pwd)/files" \
-            ROOTFS_PARTSIZE="${{ steps.meta.outputs.rootfs_size }}" \
-            CONFIG_ISO_IMAGES= CONFIG_QCOW2_IMAGES= CONFIG_VDI_IMAGES= CONFIG_VMDK_IMAGES= CONFIG_VHDX_IMAGES= \
+            ROOTFS_PARTSIZE="${ROOTFS_SIZE}" \
+            ${FMT_ARGS} \
             PACKAGES="${PKGS}"
-          ls -la bin/targets/x86/64/
 
-      - name: Create info
+      # ---------------------------------------------------------------- 发布 --
+      - name: 生成说明
         run: |
-          cat > router-info.md <<EOF
-          ## 📡 固件信息
-          - 版本: ImmortalWrt ${{ inputs.luci_version }}（x86_64）
-          - 包管理: ${{ steps.meta.outputs.pkg == 'apk' && 'apk (25.12)' || 'opkg (24.10)' }}
-          - 软件包空间: ${{ inputs.profile }}（ROOTFS_PARTSIZE=${{ steps.meta.outputs.rootfs_size }}）
-          - 格式: ${{ inputs.filesystem }}
-          - 🏠 **后台地址**: ${{ inputs.custom_router_ip }}
-          - 👤 **用户名**: root　🔑 **密码**: 无
-
-          ## 内置插件
-          - OpenClash（优先上游最新版，失败回退官方源；mihomo 内核与 GeoData 在插件内按需更新）
-          - nikki / momo（官方 feed 最新版，内核可在插件内按需下载）
-          - Homeproxy（sing-box 内核，随固件安装）
-          - bandix ${{ inputs.bandix_tag }}
-          - argon 主题${{ inputs.include_argon_config == true && ' + argon-config' || '' }}、ttyd、文件管理器、package-manager、sftp-server
-          ${{ inputs.include_singbox_easy == true && '- sing-box-easy' || '' }}
-
-          ## 说明
-          - ${{ inputs.remove_ppp == true && 'WAN 不含 PPP/PPPoE（已在构建时移除 ppp/ppp-mod-pppoe）' || 'WAN 默认 DHCP，固件内置完整 PPP/PPPoE 组件（需要拨号可在 LuCI 里改成 PPPoE）' }}
-          - squashfs 版支持 LuCI 恢复出厂；ext4 版可离线扩容根分区
-          - 多代理插件同时安装仅为预置，同一时间只能有一个插件接管流量
-          EOF
+          set -euo pipefail
+          {
+            echo "## ImmortalWrt ${VER} (${PKG})"
+            echo
+            echo "- 后台地址：http://${ROUTER_IP}"
+            echo "- 用户名 / 密码：root / 无"
+            echo "- 软件包空间：${ROOTFS_SIZE} MB"
+            echo "- 固件格式：${FORMATS}"
+            echo "- 包管理器：${PKG}"
+            if [ "$ENABLE_PPPOE" = "true" ]; then
+              echo "- 已预置 PPPoE 拨号账号（WAN）"
+            fi
+            echo
+            echo "<details><summary>预装插件（点击展开）</summary>"
+            echo
+            echo '```'
+            jq -r '.packages[]' /tmp/plan.json
+            echo '```'
+            echo
+            echo "</details>"
+          } > router-info.md
           cat router-info.md
 
       - name: 整理产物
         run: |
-          mkdir -p out
-          case "${{ inputs.filesystem }}" in
-            squashfs) PATTERN="*squashfs-combined*" ;;
-            ext4)     PATTERN="*ext4-combined*" ;;
-            *)        PATTERN="*combined*" ;;
-          esac
-          cp ib/bin/targets/x86/64/${PATTERN}.img.gz out/ 2>/dev/null || true
-          [ -n "$(ls -A out 2>/dev/null)" ] || { echo "::error::未找到固件产物"; exit 1; }
-          cd out && sha256sum * > sha256sums.txt && cd ..
-          ls -la out
+          set -euo pipefail
+          OUT="$GITHUB_WORKSPACE/out"
+          SRC="$GITHUB_WORKSPACE/ib/bin/targets/x86/64"
+          mkdir -p "$OUT"
+          cd "$SRC"
+          ls -la | head -40
 
-      - name: Upload ImmortalWrt as release assets
+          want() { case ",${FORMATS}," in *",$1,"*) return 0 ;; *) return 1 ;; esac; }
+
+          for f in *; do
+            [ -f "$f" ] || continue
+            case "$f" in
+              *combined*.img.gz)
+                want img || continue
+                case "$FILESYSTEM" in
+                  squashfs) case "$f" in *squashfs*) ;; *) continue ;; esac ;;
+                  ext4)     case "$f" in *ext4*)     ;; *) continue ;; esac ;;
+                esac
+                ;;
+              *.iso|*.iso.gz)       want iso   || continue ;;
+              *.qcow2|*.qcow2.gz)   want qcow2 || continue ;;
+              *.vmdk|*.vmdk.gz)     want vmdk  || continue ;;
+              *.vdi|*.vdi.gz)       want vdi   || continue ;;
+              *.vhdx|*.vhdx.gz)     want vhdx  || continue ;;
+              *) continue ;;
+            esac
+            cp -f "$f" "$OUT/"
+            echo "  + $f"
+          done
+
+          cd "$OUT"
+          if [ -z "$(ls -A .)" ]; then
+            echo "::error::没有收集到任何固件产物，请检查格式与文件系统参数"
+            exit 1
+          fi
+          sha256sum ./* > /tmp/sums.txt
+          mv /tmp/sums.txt sha256sums.txt
+          ls -lh
+
+      - name: 上传到 Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: Autobuild-x86-64
           body_path: router-info.md
           files: out/*
           fail_on_unmatched_files: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.GITHUB_TOKEN }}
