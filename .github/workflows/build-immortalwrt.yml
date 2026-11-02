@@ -1,6 +1,6 @@
 name: Build ImmortalWrt x86_64
 
-# 只用 ImageBuilder 打包固件，不编译源码，一次 5~15 分钟。
+# 用官方 ImageBuilder 打包 x86_64 固件，不编译源码，一次 8~20 分钟。
 # 插件清单在 config/packages.yml 里改，workflow 本身不需要动。
 on:
   workflow_dispatch:
@@ -22,20 +22,15 @@ on:
         type: string
         default: "10.10.1.1"
 
-      profile:
-        description: "软件包可用空间"
-        required: true
-        type: choice
+      rootfs_size:
+        description: "软件包空间：可直接选 2G/3G/4G，也可手填数字+单位（如 2048M、2G、4G）"
+        required: false
+        type: string
         default: "2G"
-        options:
-          - "1G"
-          - "2G"
-          - "3G"
-          - "4G"
 
       filesystem:
         description: "img 固件的文件系统"
-        required: true
+        required: false
         type: choice
         default: "both"
         options:
@@ -43,51 +38,53 @@ on:
           - "squashfs"
           - "ext4"
 
-      formats:
-        description: "固件格式，逗号分隔：img,iso,qcow2,vmdk,vdi,vhdx；填 all = 全部；默认只有 img"
-        required: false
-        type: string
-        default: "img"
-
-      enable_proxy:
-        description: "代理套件（OpenClash / nikki / momo / Homeproxy / sing-box）"
+      # ---- 固件格式（勾选式，默认只出 img） ----
+      img:
+        description: "固件格式：img 系统镜像（默认）"
         required: false
         type: boolean
         default: true
 
-      enable_monitor:
-        description: "流量监控（bandix）"
-        required: false
-        type: boolean
-        default: true
-
-      enable_docker:
-        description: "Docker"
+      iso:
+        description: "固件格式：iso 光盘镜像（虚拟机用）"
         required: false
         type: boolean
         default: false
 
-      enable_pppoe:
-        description: "预置 PPPoE 拨号账号密码"
+      qcow2:
+        description: "固件格式：qcow2（KVM / PVE 虚拟机）"
         required: false
         type: boolean
         default: false
 
+      vmdk:
+        description: "固件格式：vmdk（VMware 虚拟机）"
+        required: false
+        type: boolean
+        default: false
+
+      vdi:
+        description: "固件格式：vdi（VirtualBox 虚拟机）"
+        required: false
+        type: boolean
+        default: false
+
+      vhdx:
+        description: "固件格式：vhdx（Hyper-V 虚拟机）"
+        required: false
+        type: boolean
+        default: false
+
+      # ---- PPPoE：两项都填才生效，否则 WAN 走 DHCP ----
       pppoe_account:
-        description: "PPPoE 宽带账号（勾选预置时必填）"
+        description: "PPPoE 宽带账号（留空 = WAN 用 DHCP）"
         required: false
         type: string
 
       pppoe_password:
-        description: "PPPoE 宽带密码（勾选预置时必填）"
+        description: "PPPoE 宽带密码（与账号同时填写才生效）"
         required: false
         type: string
-
-      remove_ppp:
-        description: "移除固件里的 PPP/PPPoE 组件（勾选 PPPoE 拨号时不可用）"
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   contents: write
@@ -111,13 +108,16 @@ jobs:
         env:
           LUCI_VERSION: ${{ inputs.luci_version }}
           ROUTER_IP: ${{ inputs.custom_router_ip }}
-          PROFILE: ${{ inputs.profile }}
+          ROOTFS_IN: ${{ inputs.rootfs_size }}
           FILESYSTEM_IN: ${{ inputs.filesystem }}
-          FORMATS_IN: ${{ inputs.formats }}
-          ENABLE_PPPOE_IN: ${{ inputs.enable_pppoe }}
-          PPPOE_ACCOUNT: ${{ inputs.pppoe_account }}
-          PPPOE_PASSWORD: ${{ inputs.pppoe_password }}
-          REMOVE_PPP_IN: ${{ inputs.remove_ppp }}
+          FMT_IMG: ${{ inputs.img }}
+          FMT_ISO: ${{ inputs.iso }}
+          FMT_QCOW2: ${{ inputs.qcow2 }}
+          FMT_VMDK: ${{ inputs.vmdk }}
+          FMT_VDI: ${{ inputs.vdi }}
+          FMT_VHDX: ${{ inputs.vhdx }}
+          PPPOE_ACCOUNT_IN: ${{ inputs.pppoe_account }}
+          PPPOE_PASSWORD_IN: ${{ inputs.pppoe_password }}
         run: |
           set -euo pipefail
 
@@ -127,38 +127,48 @@ jobs:
             *) echo "::error::不支持的版本 $LUCI_VERSION"; exit 1 ;;
           esac
 
-          case "$PROFILE" in
-            1G) ROOTFS_SIZE=1024 ;;
-            2G) ROOTFS_SIZE=2048 ;;
-            3G) ROOTFS_SIZE=3072 ;;
-            4G) ROOTFS_SIZE=4096 ;;
-            *) echo "::error::未知空间 $PROFILE"; exit 1 ;;
+          # ---- 空间：支持 2G / 3G / 4G / 2048 / 2048M / 4GB ----
+          v="$(printf '%s' "${ROOTFS_IN:-2G}" | tr 'A-Z' 'a-z' | tr -d ' ')"
+          case "$v" in
+            *gb) n="${v%gb}"; mult=1024 ;;
+            *mb) n="${v%mb}"; mult=1 ;;
+            *g)  n="${v%g}";  mult=1024 ;;
+            *m)  n="${v%m}";  mult=1 ;;
+            *)   n="$v";      mult=1 ;;
           esac
+          case "$n" in
+            ''|*[!0-9]*) echo "::error::软件包空间无法识别：${ROOTFS_IN}（可填 2G / 3G / 4G / 2048 / 2048M）"; exit 1 ;;
+          esac
+          ROOTFS_SIZE=$((n * mult))
+          if [ "$ROOTFS_SIZE" -lt 64 ] || [ "$ROOTFS_SIZE" -gt 16384 ]; then
+            echo "::error::软件包空间 ${ROOTFS_SIZE}MB 超出范围（64 ~ 16384MB）"; exit 1
+          fi
 
-          # 格式：小写、去空格；all 展开成全部
-          FMT="$(printf '%s' "$FORMATS_IN" | tr 'A-Z' 'a-z' | tr -d ' ')"
+          # ---- 格式：勾选的都出，全不勾时兜底为 img ----
+          FMT=""
+          [ "${FMT_IMG:-false}"   = "true" ] && FMT="$FMT img"
+          [ "${FMT_ISO:-false}"   = "true" ] && FMT="$FMT iso"
+          [ "${FMT_QCOW2:-false}" = "true" ] && FMT="$FMT qcow2"
+          [ "${FMT_VMDK:-false}"  = "true" ] && FMT="$FMT vmdk"
+          [ "${FMT_VDI:-false}"   = "true" ] && FMT="$FMT vdi"
+          [ "${FMT_VHDX:-false}"  = "true" ] && FMT="$FMT vhdx"
+          FMT="$(printf '%s' "$FMT" | sed 's/^ *//; s/ *$//; s/ \+/,/g')"
           [ -z "$FMT" ] && FMT="img"
-          [ "$FMT" = "all" ] && FMT="img,iso,qcow2,vmdk,vdi,vhdx"
 
-          for f in ${FMT//,/ }; do
-            case "$f" in
-              img|iso|qcow2|vmdk|vdi|vhdx) ;;
-              *) echo "::error::未知固件格式：$f（可选 img,iso,qcow2,vmdk,vdi,vhdx,all）"; exit 1 ;;
-            esac
-          done
-
-          case "$FILESYSTEM_IN" in
-            both|squashfs|ext4) ;;
-            *) echo "::error::未知文件系统 $FILESYSTEM_IN"; exit 1 ;;
+          case "${FILESYSTEM_IN:-both}" in
+            both|squashfs|ext4) FILESYSTEM="${FILESYSTEM_IN:-both}" ;;
+            *) echo "::error::未知文件系统 ${FILESYSTEM_IN}"; exit 1 ;;
           esac
 
-          if [ "$ENABLE_PPPOE_IN" = "true" ]; then
-            if [ -z "${PPPOE_ACCOUNT:-}" ] || [ -z "${PPPOE_PASSWORD:-}" ]; then
-              echo "::error::已勾选预置 PPPoE，但账号或密码为空"; exit 1
-            fi
-            if [ "$REMOVE_PPP_IN" = "true" ]; then
-              echo "::error::「预置 PPPoE」与「移除 PPP 组件」冲突，请二选一"; exit 1
-            fi
+          # ---- PPPoE：账号密码都填才启用，否则 WAN 保持 DHCP ----
+          ENABLE_PPPOE=false
+          PPPOE_ACCOUNT="${PPPOE_ACCOUNT_IN:-}"
+          PPPOE_PASSWORD="${PPPOE_PASSWORD_IN:-}"
+          if [ -n "$PPPOE_ACCOUNT" ] && [ -n "$PPPOE_PASSWORD" ]; then
+            ENABLE_PPPOE=true
+          elif [ -n "$PPPOE_ACCOUNT" ] || [ -n "$PPPOE_PASSWORD" ]; then
+            echo "::warning::PPPoE 账号与密码需要同时填写，本次已忽略，WAN 使用 DHCP"
+            PPPOE_ACCOUNT=""; PPPOE_PASSWORD=""
           fi
 
           {
@@ -166,23 +176,20 @@ jobs:
             echo "PKG=$PKG"
             echo "BRANCH=$BRANCH"
             echo "ROOTFS_SIZE=$ROOTFS_SIZE"
-            echo "FILESYSTEM=$FILESYSTEM_IN"
+            echo "FILESYSTEM=$FILESYSTEM"
             echo "FORMATS=$FMT"
             echo "ROUTER_IP=$ROUTER_IP"
-            echo "ENABLE_PPPOE=$ENABLE_PPPOE_IN"
-            echo "REMOVE_PPP=$REMOVE_PPP_IN"
+            echo "ENABLE_PPPOE=$ENABLE_PPPOE"
             echo "PPPOE_ACCOUNT=$PPPOE_ACCOUNT"
             echo "PPPOE_PASSWORD=$PPPOE_PASSWORD"
           } >> "$GITHUB_ENV"
 
-          echo "版本 $LUCI_VERSION（$PKG / $BRANCH），空间 $PROFILE，格式 $FMT，后台 $ROUTER_IP"
+          echo "版本 $LUCI_VERSION（$PKG / $BRANCH）"
+          echo "空间 ${ROOTFS_SIZE}MB，格式 $FMT，后台 $ROUTER_IP"
+          echo "PPPoE 预置：$ENABLE_PPPOE"
 
       # ---------------------------------------------------------------- 计划 --
       - name: 生成构建计划（读取 config/packages.yml）
-        env:
-          ENABLE_PROXY: ${{ inputs.enable_proxy }}
-          ENABLE_MONITOR: ${{ inputs.enable_monitor }}
-          ENABLE_DOCKER: ${{ inputs.enable_docker }}
         run: |
           set -euo pipefail
           python3 -c "import yaml" 2>/dev/null \
@@ -303,7 +310,7 @@ jobs:
           }
 
           set +e
-          { jq -r '.releases[] | [.package, .repo, .tag, (.required|tostring)] | @tsv' /tmp/plan.json \
+          jq -r '.releases[] | [.package, .repo, .tag, (.required|tostring)] | @tsv' /tmp/plan.json \
             | while IFS=$'\t' read -r pkg repo tag required; do
                 [ -z "$pkg" ] && continue
                 echo "→ $pkg  ($repo @ $tag)"
@@ -317,7 +324,7 @@ jobs:
                 fi
                 url="$(pick "$list" "$pkg")"
 
-                # 最新版里没有 → 往最近 30 个 release 里翻（上游常把后端和 luci 分开发版）
+                # 最新版里没有 → 往最近 30 个 release 里翻（上游常把后端和前端分开发版）
                 if [ -z "$url" ] && [ "$tag" = "latest" ]; then
                   list="$(api "https://api.github.com/repos/${repo}/releases?per_page=30" 2>/dev/null \
                           | jq -r '.[].assets[].browser_download_url' 2>/dev/null)"
@@ -346,7 +353,6 @@ jobs:
                   echo "  ⚠️  下载失败，跳过"
                 fi
               done
-          }
           rc=$?
           set -e
           if [ "$rc" -ne 0 ]; then
@@ -371,7 +377,7 @@ jobs:
           set -euo pipefail
           cd ib
 
-          # 先全部关掉虚拟盘格式，再按用户选择打开
+          # 先全部关掉虚拟盘格式，再按用户勾选打开
           sed -i -E 's/^(CONFIG_(ISO|QCOW2|VDI|VMDK|VHDX)_IMAGES)=y/# \1 is not set/' .config
 
           FMT_ARGS=""
@@ -382,14 +388,11 @@ jobs:
               vdi)   FMT_ARGS="$FMT_ARGS CONFIG_VDI_IMAGES=y" ;;
               vmdk)  FMT_ARGS="$FMT_ARGS CONFIG_VMDK_IMAGES=y" ;;
               vhdx)  FMT_ARGS="$FMT_ARGS CONFIG_VHDX_IMAGES=y" ;;
-              img)   ;;  # 默认产物，无需开关
+              img)   ;;  # img 是默认产物，无需开关
             esac
           done
 
           PKGS="$(cat /tmp/packages.txt)"
-          if [ "$REMOVE_PPP" = "true" ]; then
-            PKGS=" -ppp -ppp-mod-pppoe ${PKGS}"
-          fi
 
           echo "PACKAGES: ${PKGS}"
           echo "格式参数: ${FMT_ARGS}"
@@ -416,6 +419,8 @@ jobs:
             echo "- 包管理器：${PKG}"
             if [ "$ENABLE_PPPOE" = "true" ]; then
               echo "- 已预置 PPPoE 拨号账号（WAN）"
+            else
+              echo "- WAN 默认 DHCP"
             fi
             echo
             echo "<details><summary>预装插件（点击展开）</summary>"

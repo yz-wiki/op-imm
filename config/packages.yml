@@ -1,22 +1,22 @@
 # =============================================================================
 #  ImmortalWrt x86_64 固件 —— 插件清单
 # =============================================================================
-#  这是整份构建配置里唯一需要你日常修改的文件。
+#  这是整份构建配置里唯一需要日常修改的文件。
 #  改完直接去 Actions → Run workflow，不需要动 workflow 里的任何东西。
 #
-#  三个层级：
-#    1. base           —— 基础组件，每次都会编入
-#    2. groups         —— 分组插件，对应 Run workflow 页面上的开关
-#    3. extra          —— 你自己的补充，想装什么写什么
+#  规则：
+#    · 每行一个包名，写的是 opkg/apk 的包名（不是文件名）
+#    · 以 "#" 开头 = 不编译；把 "#" 删掉 = 参与编译
+#    · 以 "-" 开头 = 从固件里移除该包（如 "-dnsmasq"）
+#    · 想整组关闭，把组名和下面的行一起注释掉即可
 #
-#  包名必须与仓库里的一致（opkg/apk 的包名，不是文件名）。
-#  不确定包是否存在？先查 https://downloads.immortalwrt.org 或对应 feed。
+#  下面所有取消注释的包，都已确认存在于 ImmortalWrt 官方源
+#  （openwrt-24.10 与 openwrt-25.12 两个分支都有）。少数标注了版本限制。
 # =============================================================================
 
 
 # -----------------------------------------------------------------------------
 # 1. 基础组件（官方源，默认全装，一般不用动）
-#    以 "-" 开头表示从固件里移除该包
 # -----------------------------------------------------------------------------
 base:
   - curl
@@ -49,15 +49,14 @@ base:
 
 # -----------------------------------------------------------------------------
 # 2. 分组插件
-#    组名与 Run workflow 的开关一一对应：
-#      proxy   ←→ enable_proxy
-#      monitor ←→ enable_monitor
-#      docker  ←→ enable_docker
-#    组内增删插件不用改 workflow；新增一个组才需要同步加开关。
+#    这里的组没有开关，删掉注释就生效、整组注释就关闭。
+#    只要组里还有至少一个未注释的包，这个组就算启用。
 # -----------------------------------------------------------------------------
 groups:
 
-  # --- 代理 / 分流 -----------------------------------------------------------
+  # ===========================================================================
+  # 代理 / 分流
+  # ===========================================================================
   proxy:
     - luci-app-openclash
     - nikki
@@ -70,21 +69,112 @@ groups:
     - luci-i18n-homeproxy-zh-cn
     - sing-box
 
-  # --- 流量 / 状态监控 -------------------------------------------------------
+    # 以下代理插件按需取消注释（同一时间建议只留一个接管流量）
+    # - luci-app-passwall
+    # - luci-i18n-passwall-zh-cn
+    # - luci-app-dae
+    # - luci-i18n-dae-zh-cn
+    # - luci-app-smartdns
+    # - luci-i18n-smartdns-zh-cn
+    # - luci-app-https-dns-proxy
+    # - luci-i18n-https-dns-proxy-zh-cn
+    # - luci-app-zerotier
+    # - luci-i18n-zerotier-zh-cn
+
+  # ===========================================================================
+  # 流量 / 状态监控
+  # ===========================================================================
   monitor:
+    # bandix 后端 + LuCI 前端（前端在独立仓库，见下面的 github_releases）
     - bandix
     - luci-app-bandix
     - luci-i18n-bandix-zh-cn
 
-  # --- Docker（x86 可用，默认关闭，包体积较大）-------------------------------
-  docker:
-    - docker
-    - dockerd
-    - containerd
-    - runc
-    - docker-compose
-    - luci-app-dockerman
-    - luci-i18n-dockerman-zh-cn
+    # - luci-app-netdata
+    # - luci-i18n-netdata-zh-cn
+    # - luci-app-nlbwmon
+    # - luci-i18n-nlbwmon-zh-cn
+    # - luci-app-vnstat2
+    # - luci-i18n-vnstat2-zh-cn
+    # - luci-app-sqm
+    # - luci-i18n-sqm-zh-cn
+
+  # ===========================================================================
+  # Docker（整组默认关闭，包体积大，x86 可用）
+  # 想启用：把 "docker:" 和下面每一行的 "# " 去掉
+  # ===========================================================================
+  # docker:
+  #   - docker
+  #   - dockerd
+  #   - containerd
+  #   - runc
+  #   - docker-compose
+  #   - luci-app-dockerman
+  #   - luci-i18n-dockerman-zh-cn
+
+  # ===========================================================================
+  # 存储 / 下载（整组默认关闭）
+  # ===========================================================================
+  # nas:
+  #   - luci-app-samba4
+  #   - luci-i18n-samba4-zh-cn
+  #   - luci-app-ksmbd
+  #   - luci-app-minidlna
+  #   - luci-i18n-minidlna-zh-cn
+  #   - luci-app-transmission
+  #   - luci-i18n-transmission-zh-cn
+  #   - luci-app-qbittorrent
+  #   - luci-i18n-qbittorrent-zh-cn
+  #   - luci-app-aria2
+  #   - luci-i18n-aria2-zh-cn
+  #   - luci-app-hd-idle
+  #   - luci-i18n-hd-idle-zh-cn
+
+  # ===========================================================================
+  # 网络工具（整组默认关闭）
+  # ===========================================================================
+  # network:
+  #   - luci-app-upnp
+  #   - luci-i18n-upnp-zh-cn
+  #   - luci-app-ddns
+  #   - luci-i18n-ddns-zh-cn
+  #   - luci-app-mwan3
+  #   - luci-i18n-mwan3-zh-cn
+  #   - luci-app-wol
+  #   - luci-i18n-wol-zh-cn
+  #   - luci-app-tinyproxy
+  #   - luci-i18n-tinyproxy-zh-cn
+  #   - luci-app-cloudflared
+  #   - luci-i18n-cloudflared-zh-cn
+  #   - luci-app-frpc
+  #   - luci-i18n-frpc-zh-cn
+  #   - luci-app-frps
+  #   - luci-i18n-frps-zh-cn
+  #   - luci-app-nps
+  #   - luci-i18n-nps-zh-cn
+  #   - luci-app-openvpn
+  #   - luci-i18n-openvpn-zh-cn
+  #   - luci-app-softethervpn
+  #   - luci-i18n-softethervpn-zh-cn
+
+  # ===========================================================================
+  # 系统工具（整组默认关闭）
+  # ===========================================================================
+  # system:
+  #   - luci-app-commands
+  #   - luci-i18n-commands-zh-cn
+  #   - luci-app-cpufreq
+  #   - luci-i18n-cpufreq-zh-cn
+  #   - luci-app-attendedsysupgrade
+  #   - luci-i18n-attendedsysupgrade-zh-cn
+  #   - luci-app-uhttpd
+  #   - luci-i18n-uhttpd-zh-cn
+  #   - luci-app-watchcat
+  #   - luci-i18n-watchcat-zh-cn
+  #   - luci-app-wifischedule
+  #   - luci-i18n-wifischedule-zh-cn
+  #   - luci-app-vlmcsd
+  #   - luci-i18n-vlmcsd-zh-cn
 
 
 # -----------------------------------------------------------------------------
@@ -94,13 +184,20 @@ groups:
 #      - luci-i18n-lucky-zh-cn
 #    如果这个包在下面 feeds 的第三方仓库里，会自动接上仓库；如果只在 GitHub
 #    release 发布，需要在下面的 github_releases 里补一条。
+#
+#    几个常见但官方源没有、需要额外源的包（这里没有预置，需要时自行加源）：
+#      - luci-app-lucky          （lucky 官方源不含，需第三方 feed 或 release）
+#      - luci-app-ssr-plus       （不在官方源，来自 lede/immortalwrt 的 luci feed）
+#      - luci-app-mosdns         （需第三方 feed）
+#      - luci-app-tailscale      （需第三方 feed）
+#      - luci-app-bandix-plus    （多网口版本前端，见下面 github_releases 注释）
 # -----------------------------------------------------------------------------
 extra: []
 
 
 # -----------------------------------------------------------------------------
 # 4. GitHub Release 插件
-#    官方源和第三方仓库都没有、只在上游 release 里发布的包。
+#    官方源和第三方仓库都没有、只在 GitHub release 里发布的包。
 #    系统会按 arch(x86_64/all) 和当前包格式(apk/ipk)自动挑选资产。
 #
 #    字段：
@@ -113,17 +210,24 @@ extra: []
 #    只有出现在 base/groups/extra 里的包才会被下载，写在这里但没启用的不下载。
 # -----------------------------------------------------------------------------
 github_releases:
+  # bandix 后端（流量采集服务）
   - package: bandix
     repo: timsaya/openwrt-bandix
     required: true
 
+  # ⚠️ bandix 的 LuCI 前端在**另一个仓库**，不在后端仓库里
   - package: luci-app-bandix
-    repo: timsaya/openwrt-bandix
+    repo: timsaya/luci-app-bandix
     required: true
 
   - package: luci-i18n-bandix-zh-cn
-    repo: timsaya/openwrt-bandix
+    repo: timsaya/luci-app-bandix
     required: false
+
+  # 多网口版本（与上面二选一，需同时在 groups.monitor 里换成 luci-app-bandix-plus）
+  # - package: luci-app-bandix-plus
+  #   repo: timsaya/luci-app-bandix-plus
+  #   required: false
 
   # OpenClash：优先拿上游最新版，失败则用官方源里的
   - package: luci-app-openclash

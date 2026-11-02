@@ -6,9 +6,9 @@
 输入环境变量：
     PKG       apk | ipk          —— 当前版本的包管理格式
     BRANCH    openwrt-25.12 等   —— 用于替换 feed 地址里的 {branch}
-    PROFILE   flash 大小标签（仅记录，不影响解析）
 
-分组开关（缺省 true）：ENABLE_PROXY / ENABLE_MONITOR / ENABLE_DOCKER
+分组没有开关：只要组里还有一个没被注释掉的包，这个组就启用；
+整组注释掉（值为 null）就跳过。
 
 输出 /tmp/plan.json：
     {
@@ -32,10 +32,6 @@ OUT = "/tmp/plan.json"
 def die(msg):
     sys.stderr.write("::error::%s\n" % msg)
     sys.exit(1)
-
-
-def flag(name, default="true"):
-    return str(os.environ.get(name, default)).strip().lower() in ("1", "true", "yes", "on")
 
 
 try:
@@ -70,9 +66,10 @@ def main():
     groups = cfg.get("groups") or {}
     enabled_groups = []
     for gname, items in groups.items():
-        if flag("ENABLE_" + str(gname).upper().replace("-", "_")):
-            add(items)
-            enabled_groups.append(gname)
+        if not items:
+            continue          # 整组被注释掉了
+        add(items)
+        enabled_groups.append(str(gname))
 
     add(cfg.get("extra"))
 
@@ -84,6 +81,9 @@ def main():
             ordered.append(p)
     packages = ordered
 
+    if not packages:
+        die("config/packages.yml 里一个包都没有，检查缩进或注释")
+
     # ---- 2. feeds -----------------------------------------------------------
     feeds = []
     for f in cfg.get("feeds") or []:
@@ -93,9 +93,9 @@ def main():
         url = f.get("apk") if pkg == "apk" else f.get("ipk")
         key = f.get("apk_key") if pkg == "apk" else f.get("ipk_key")
         if not url:
-            continue  # 这个源在当前包格式下不启用
+            continue          # 这个源在当前包格式下不启用
         feeds.append({
-            "name": name or url,
+            "name": name or str(url),
             "url": str(url).replace("{branch}", branch),
             "key": str(key or "").replace("{branch}", branch),
         })
