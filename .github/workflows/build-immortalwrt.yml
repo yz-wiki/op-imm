@@ -56,9 +56,15 @@ on:
 permissions:
   contents: write
 
+# release tag 固定为 Autobuild-x86-64，并发运行会互相覆盖/删除资产，必须串行
+concurrency:
+  group: build-immortalwrt
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -102,6 +108,7 @@ jobs:
             # apk 版 ImageBuilder：仓库文件为 repositories，每行一个 packages.adb 地址
             echo "https://nikkinikki.pages.dev/${BRANCH}/x86_64/nikki/packages.adb" >> repositories
             echo "https://momomomo.pages.dev/${BRANCH}/x86_64/momo/packages.adb"   >> repositories
+            # apk 用 --keys-dir 扫描目录里的 PEM 公钥，文件名任意
             curl -fL --retry 3 -o keys/nikki.pem "https://nikkinikki.pages.dev/public-key.pem"
             curl -fL --retry 3 -o keys/momo.pem  "https://momomomo.pages.dev/public-key.pem"
             cat repositories
@@ -109,9 +116,29 @@ jobs:
             # opkg 版 ImageBuilder：仓库文件为 repositories.conf
             printf 'src/gz nikki https://nikkinikki.pages.dev/%s/x86_64/nikki\n' "$BRANCH" >> repositories.conf
             printf 'src/gz momo https://momomomo.pages.dev/%s/x86_64/momo\n'   "$BRANCH" >> repositories.conf
-            curl -fL --retry 3 -o keys/nikki.pub "https://nikkinikki.pages.dev/key-build.pub"
-            curl -fL --retry 3 -o keys/momo.pub  "https://momomomo.pages.dev/key-build.pub"
+            # 关键：opkg 的验签程序 scripts/opkg-key 是按“公钥指纹”当文件名在 keys/ 里找公钥的
+            #   opkg_key_verify: usign -V -P "$OPKG_KEYS" ...   ->  usign 读 OPKG_KEYS/<usign -F 指纹>
+            # 如果直接把公钥存成 keys/nikki.pub，验签永远失败，nikki/momo 源的包一个都装不上，
+            # 构建会在 package_install 阶段报 "package mentioned in index not found"。
+            # 所以这里必须先用 usign 取指纹，再以指纹名落盘（等价于 scripts/opkg-key add）。
+            export PATH="$PWD/staging_dir/host/bin:$PATH"
+            add_key() {
+              name="$1"; url="$2"
+              tmp="keys/.${name}.pub.tmp"
+              if ! curl -fsSL --retry 3 -o "$tmp" "$url"; then
+                echo "::error::${name} 公钥下载失败: ${url}"; exit 1
+              fi
+              fp="$(usign -F -p "$tmp" || true)"
+              if [ -z "$fp" ]; then
+                echo "::error::${name} 公钥解析不出指纹: ${url}"; exit 1
+              fi
+              mv -f "$tmp" "keys/$fp"
+              echo "OK  keys/$fp  <- ${name}"
+            }
+            add_key nikki "https://nikkinikki.pages.dev/key-build.pub"
+            add_key momo  "https://momomomo.pages.dev/key-build.pub"
             cat repositories.conf
+            ls -la keys
           fi
 
       - name: Save Custom Router IP into uci-defaults
@@ -151,46 +178,90 @@ jobs:
         working-directory: ib/packages
         run: |
           PKG="${{ steps.meta.outputs.pkg }}"
-          dl() { curl -fL --retry 3 -o "$2" "$1" && echo "OK  $2" || echo "SKIP $1"; }
+          # GitHub Actions 的 run 默认是 bash -e：任何“探测型”命令（尤其管道末尾的 grep）
+          # 返回非 0 都会让整个步骤中止，连后面的降级分支都走不到。所以下面一律显式兜底。
+          dl() {
+            rm -f "$2"
+            if curl -fL --retry 3 --retry-delay 2 -o "$2" "$1"; then
+              echo "OK    $2"
+              return 0
+            fi
+            rm -f "$2"
+            echo "SKIP  $1"
+            return 1
+          }
 
           # ---- bandix（本地包，必须成功）----
-          BANDIX_URL=$(curl -sL "https://api.github.com/repos/timsaya/openwrt-bandix/releases/tags/${{ inputs.bandix_tag }}" \
+          BANDIX_URL="$(curl -sL "https://api.github.com/repos/timsaya/openwrt-bandix/releases/tags/${{ inputs.bandix_tag }}" \
             | jq -r '.assets[].browser_download_url' \
-            | grep "x86_64\.${PKG}$" | head -1)
-          [ -n "$BANDIX_URL" ] && dl "$BANDIX_URL" "$(basename "$BANDIX_URL")" || { echo "::error::bandix ${PKG} 包未找到"; exit 1; }
+            | grep "x86_64\.${PKG}$" | head -1 || true)"
+          if [ -z "$BANDIX_URL" ]; then
+            echo "::error::bandix ${PKG} 包未找到（tag=${{ inputs.bandix_tag }}）"; exit 1
+          fi
+          dl "$BANDIX_URL" "$(basename "$BANDIX_URL")" || { echo "::error::bandix 下载失败：$BANDIX_URL"; exit 1; }
 
           # ---- luci-app-bandix 界面（timsaya/luci-app-bandix，与后端同版本号）----
+          # 后端 tag 形如 v0.12.12，界面 tag 形如 v0.12.12-r5；r5 会随上游递增，不能写死。
+          # 先试 ${bandix_tag}-r5，不存在就在最近 50 个 release 里找以 bandix_tag 开头的最新 tag。
           LUCI_BANDIX_VER="${{ inputs.bandix_tag }}-r5"
-          LUCI_BANDIX_URL=$(curl -sL "https://api.github.com/repos/timsaya/luci-app-bandix/releases/tags/${LUCI_BANDIX_VER}" \
+          if ! curl -sfL -o /dev/null "https://api.github.com/repos/timsaya/luci-app-bandix/releases/tags/${LUCI_BANDIX_VER}"; then
+            LUCI_BANDIX_VER="$(curl -sL "https://api.github.com/repos/timsaya/luci-app-bandix/releases?per_page=50" \
+              | jq -r --arg t "${{ inputs.bandix_tag }}" '[.[] | .tag_name | select(startswith($t))][0] // empty' || true)"
+          fi
+          if [ -z "$LUCI_BANDIX_VER" ]; then
+            echo "::error::luci-app-bandix 找不到与 ${{ inputs.bandix_tag }} 对应的 release"; exit 1
+          fi
+          echo "luci-app-bandix tag: $LUCI_BANDIX_VER"
+
+          LUCI_BANDIX_URL="$(curl -sL "https://api.github.com/repos/timsaya/luci-app-bandix/releases/tags/${LUCI_BANDIX_VER}" \
             | jq -r '.assets[].browser_download_url' \
-            | grep "luci-app-bandix-.*\.${PKG}$" | head -1)
-          LUCI_BANDIX_I18N_URL=$(curl -sL "https://api.github.com/repos/timsaya/luci-app-bandix/releases/tags/${LUCI_BANDIX_VER}" \
+            | grep "luci-app-bandix-.*\.${PKG}$" | head -1 || true)"
+          LUCI_BANDIX_I18N_URL="$(curl -sL "https://api.github.com/repos/timsaya/luci-app-bandix/releases/tags/${LUCI_BANDIX_VER}" \
             | jq -r '.assets[].browser_download_url' \
-            | grep "luci-i18n-bandix-zh-cn-.*\.${PKG}$" | head -1)
-          [ -n "$LUCI_BANDIX_URL" ] && dl "$LUCI_BANDIX_URL" "$(basename "$LUCI_BANDIX_URL")" || { echo "::error::luci-app-bandix ${LUCI_BANDIX_VER} 未找到"; exit 1; }
-          [ -n "$LUCI_BANDIX_I18N_URL" ] && dl "$LUCI_BANDIX_I18N_URL" "$(basename "$LUCI_BANDIX_I18N_URL")" || echo "WARN bandix 中文包未找到，跳过"
+            | grep "luci-i18n-bandix-zh-cn-.*\.${PKG}$" | head -1 || true)"
+          if [ -z "$LUCI_BANDIX_URL" ]; then
+            echo "::error::luci-app-bandix ${LUCI_BANDIX_VER} 未找到"; exit 1
+          fi
+          dl "$LUCI_BANDIX_URL" "$(basename "$LUCI_BANDIX_URL")" || { echo "::error::luci-app-bandix 下载失败"; exit 1; }
+          if [ -n "$LUCI_BANDIX_I18N_URL" ]; then
+            dl "$LUCI_BANDIX_I18N_URL" "$(basename "$LUCI_BANDIX_I18N_URL")" || echo "WARN bandix 中文包下载失败，构建时跳过"
+          else
+            echo "WARN ${LUCI_BANDIX_VER} 里没有 bandix 中文包，构建时跳过"
+          fi
           ls -la bandix* luci-app-bandix* luci-i18n-bandix* 2>/dev/null || true
 
           # ---- OpenClash 追新（失败则回退官方源版本）----
-          OC_URL=$(curl -sL "https://api.github.com/repos/vernesong/OpenClash/releases/latest" \
+          OC_URL="$(curl -sL "https://api.github.com/repos/vernesong/OpenClash/releases/latest" \
             | jq -r '.assets[].browser_download_url' \
-            | grep "\.${PKG}$" | head -1)
-          [ -n "$OC_URL" ] && dl "$OC_URL" "$(basename "$OC_URL")" || echo "OpenClash 使用官方源版本"
+            | grep "\.${PKG}$" | head -1 || true)"
+          if [ -n "$OC_URL" ]; then
+            dl "$OC_URL" "$(basename "$OC_URL")" || echo "OpenClash 追新失败，使用官方源版本"
+          else
+            echo "OpenClash 上游没有 ${PKG} 资产，使用官方源版本"
+          fi
 
           # ---- argon-config（失败则仅保留官方源 argon 主题）----
           if [ "${{ inputs.include_argon_config }}" = "true" ]; then
-            AC_URL=$(curl -sL "https://api.github.com/repos/jerrykuku/luci-theme-argon/releases/latest" \
+            AC_URL="$(curl -sL "https://api.github.com/repos/jerrykuku/luci-theme-argon/releases/latest" \
               | jq -r '.assets[].browser_download_url' \
-              | grep "luci-app-argon-config" | grep -v "i18n" | grep "\.${PKG}$" | head -1)
-            [ -n "$AC_URL" ] && dl "$AC_URL" "$(basename "$AC_URL")" || echo "argon-config 下载失败，跳过"
+              | grep "luci-app-argon-config" | grep -v "i18n" | grep "\.${PKG}$" | head -1 || true)"
+            if [ -n "$AC_URL" ]; then
+              dl "$AC_URL" "$(basename "$AC_URL")" || echo "argon-config 下载失败，构建时跳过"
+            else
+              echo "argon-config 上游没有 ${PKG} 资产，构建时跳过"
+            fi
           fi
 
           # ---- sing-box-easy（仅 ipk）----
           if [ "${{ inputs.include_singbox_easy }}" = "true" ] && [ "$PKG" = "ipk" ]; then
-            SBE_URL=$(curl -sL "https://api.github.com/repos/SealinGp/sing-box-easy/releases/latest" \
+            SBE_URL="$(curl -sL "https://api.github.com/repos/SealinGp/sing-box-easy/releases/latest" \
               | jq -r '.assets[].browser_download_url' \
-              | grep "sing-box-easy_.*_x86_64\.ipk$" | head -1)
-            [ -n "$SBE_URL" ] && dl "$SBE_URL" "$(basename "$SBE_URL")" || echo "sing-box-easy 下载失败，跳过"
+              | grep "sing-box-easy_.*_x86_64\.ipk$" | head -1 || true)"
+            if [ -n "$SBE_URL" ]; then
+              dl "$SBE_URL" "$(basename "$SBE_URL")" || echo "sing-box-easy 下载失败，构建时跳过"
+            else
+              echo "sing-box-easy 上游没有 x86_64 ipk 资产，构建时跳过"
+            fi
           elif [ "${{ inputs.include_singbox_easy }}" = "true" ]; then
             echo "::warning::sing-box-easy 仅提供 ipk，25.12 (apk) 自动跳过"
           fi
@@ -202,6 +273,7 @@ jobs:
             n="${f//_x86_64/}"; n="${n//_all/}"
             [ "$n" != "$f" ] && mv -f "$f" "$n"
           done
+          true
 
           # luci-i18n-bandix 资产文件名的 commit 段用点号分隔（26.300.03255.108369b-r5），
           # 但包内版本是波浪号（26.300.03255~108369b-r5），apk3 按规范名找不到文件，修正之
@@ -210,6 +282,7 @@ jobs:
             n=$(printf '%s' "$f" | sed -E 's/([0-9])\.([0-9a-f]{6,})-/\1~\2-/')
             [ "$n" != "$f" ] && mv -f "$f" "$n"
           done
+          true
 
           ls -la
 
@@ -241,17 +314,42 @@ jobs:
           PKGS="$PKGS nikki luci-app-nikki luci-i18n-nikki-zh-cn"
           PKGS="$PKGS momo luci-app-momo luci-i18n-momo-zh-cn"
           PKGS="$PKGS luci-app-homeproxy luci-i18n-homeproxy-zh-cn sing-box"
-          PKGS="$PKGS bandix luci-app-bandix luci-i18n-bandix-zh-cn"
+          PKGS="$PKGS bandix luci-app-bandix"
+
+          # ===== 可选包：只加“本地确实下到了”的，避免 index not found 直接构建失败 =====
+          have() { ls packages/$1* >/dev/null 2>&1; }
+
+          if have luci-i18n-bandix-zh-cn; then
+            PKGS="$PKGS luci-i18n-bandix-zh-cn"
+          else
+            echo "skip luci-i18n-bandix-zh-cn（本地包不存在）"
+          fi
 
           if [ "${{ inputs.include_argon_config }}" = "true" ]; then
-            PKGS="$PKGS luci-app-argon-config luci-i18n-argon-config-zh-cn"
+            if have luci-app-argon-config; then
+              PKGS="$PKGS luci-app-argon-config"
+              if have luci-i18n-argon-config; then
+                PKGS="$PKGS luci-i18n-argon-config-zh-cn"
+              else
+                echo "skip luci-i18n-argon-config-zh-cn（本地包不存在）"
+              fi
+            else
+              echo "skip luci-app-argon-config（本地包不存在，回退官方源 argon 主题）"
+            fi
           fi
+
           if [ "${{ inputs.include_singbox_easy }}" = "true" ] && [ "${{ steps.meta.outputs.pkg }}" = "ipk" ]; then
-            PKGS="$PKGS sing-box-easy"
+            if have sing-box-easy; then
+              PKGS="$PKGS sing-box-easy"
+            else
+              echo "skip sing-box-easy（本地包不存在）"
+            fi
           fi
+
           if [ "${{ inputs.remove_ppp }}" = "true" ]; then
             PKGS=" -ppp -ppp-mod-pppoe ${PKGS}"
           fi
+          set +x
 
           echo "PACKAGES: ${PKGS}"
           make image PROFILE="generic" \
@@ -273,15 +371,15 @@ jobs:
           - 👤 **用户名**: root　🔑 **密码**: 无
 
           ## 内置插件
-          - OpenClash（官方源版本，mihomo 内核与 GeoData 可在插件内按需更新）
+          - OpenClash（优先上游最新版，失败回退官方源；mihomo 内核与 GeoData 在插件内按需更新）
           - nikki / momo（官方 feed 最新版，内核可在插件内按需下载）
-          - Homeproxy
+          - Homeproxy（sing-box 内核，随固件安装）
           - bandix ${{ inputs.bandix_tag }}
           - argon 主题${{ inputs.include_argon_config == true && ' + argon-config' || '' }}、ttyd、文件管理器、package-manager、sftp-server
           ${{ inputs.include_singbox_easy == true && '- sing-box-easy' || '' }}
 
           ## 说明
-          - WAN 默认 DHCP，固件不含 PPP/PPPoE
+          - ${{ inputs.remove_ppp == true && 'WAN 不含 PPP/PPPoE（已在构建时移除 ppp/ppp-mod-pppoe）' || 'WAN 默认 DHCP，固件内置完整 PPP/PPPoE 组件（需要拨号可在 LuCI 里改成 PPPoE）' }}
           - squashfs 版支持 LuCI 恢复出厂；ext4 版可离线扩容根分区
           - 多代理插件同时安装仅为预置，同一时间只能有一个插件接管流量
           EOF
@@ -295,7 +393,7 @@ jobs:
             ext4)     PATTERN="*ext4-combined*" ;;
             *)        PATTERN="*combined*" ;;
           esac
-          cp ib/bin/targets/x86/64/${PATTERN}.img.gz out/ 2>/dev/null
+          cp ib/bin/targets/x86/64/${PATTERN}.img.gz out/ 2>/dev/null || true
           [ -n "$(ls -A out 2>/dev/null)" ] || { echo "::error::未找到固件产物"; exit 1; }
           cd out && sha256sum * > sha256sums.txt && cd ..
           ls -la out
